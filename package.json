@@ -1,0 +1,31 @@
+{
+  "name": "lifeos-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end test framework (Playwright + TypeScript) for the LifeOS web app",
+  "scripts": {
+    "test": "playwright test",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:regression": "playwright test --grep @regression",
+    "test:mobile": "playwright test --project=mobile-chrome",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "report": "playwright show-report",
+    "summary": "node scripts/summarize.mjs",
+    "typecheck": "tsc --noEmit",
+    "browsers": "playwright install --with-deps chromium",
+    "test:api": "playwright test --project=chromium --grep @api",
+    "test:security": "playwright test --project=chromium --grep @security"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.0.0",
+    "allure-playwright": "^3.0.0",
+    "exceljs": "^4.4.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20.12"
+  }
+}
