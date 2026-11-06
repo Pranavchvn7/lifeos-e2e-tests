@@ -86,7 +86,7 @@ jobs:
             -f state=pending -f context="e2e / smoke ($label)" \
             -f description="Smoke tests are running…" -f target_url="$RUN_URL"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -180,7 +180,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
