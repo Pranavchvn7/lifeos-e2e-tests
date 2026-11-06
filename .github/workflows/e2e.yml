@@ -60,7 +60,7 @@ jobs:
       # Production, nightly and manual runs stay at one worker (the production rate limit is on).
       E2E_WORKERS: ${{ github.event_name == 'repository_dispatch' && !startsWith(github.event.client_payload.environment, 'Production') && '2' || '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the target URL
         run: |
@@ -178,7 +178,7 @@ jobs:
     env:
       VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -256,7 +256,7 @@ jobs:
 
       - name: Check out the existing report site (for the history)
         if: steps.branch.outputs.exists == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: gh-pages
           path: site
