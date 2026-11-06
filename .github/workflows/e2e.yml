@@ -1,0 +1,307 @@
+name: E2E tests
+
+# Shows in the Actions list as e.g. "E2E (repository_dispatch · Production · a1b2c3d)"
+run-name: E2E (${{ github.event_name }}${{ github.event.client_payload.environment && format(' · {0} · {1}', github.event.client_payload.environment, github.event.client_payload.short_sha) || '' }})
+
+on:
+  # 1. Whenever the framework itself changes (new test, fixed selector…)
+  push:
+    branches: [main]
+  pull_request:
+  # 2. Every night, the full regression suite against the live site (03:00 IST = 21:30 UTC)
+  schedule:
+    - cron: "30 21 * * *"
+  # 3. On demand, from the Actions tab ("Run workflow"), against any URL
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Site to test (leave empty to use the repository variable E2E_BASE_URL)"
+        required: false
+        type: string
+      suite:
+        description: "Which tests to run"
+        required: true
+        default: smoke
+        type: choice
+        options: [smoke, regression, all, ratelimit]
+      expect_rate_limit:
+        description: "Only for suite = ratelimit: is the sign-in limit supposed to be ON (production) or OFF (staging preview)?"
+        required: false
+        default: "on"
+        type: choice
+        options: ["on", "off"]
+  # 4. Automatically after every app deployment (sent by the app repo's "trigger-e2e" workflow)
+  repository_dispatch:
+    types: [app-deployed]
+
+permissions:
+  contents: read
+
+# A newer run for the same thing cancels the older one (pull requests only; deploy and nightly runs always finish).
+concurrency:
+  group: e2e-${{ github.event_name }}-${{ github.event.client_payload.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Priority: URL sent by the deployment > manual input > nightly URL (schedule only) > repository variable > default
+  BASE_URL: ${{ github.event.client_payload.url || inputs.base_url || (github.event_name == 'schedule' && vars.E2E_NIGHTLY_URL) || vars.E2E_BASE_URL || '' }}
+  ALLURE: "true"
+
+jobs:
+  smoke:
+    name: Smoke (desktop + mobile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Optional secrets. Empty = feature off.
+      APP_STATUS_TOKEN: ${{ secrets.APP_STATUS_TOKEN }}       # lets this run post ✅/❌ on the app's commit
+      VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }} # lets tests open password-protected Vercel previews
+      # Staging previews have the sign-up rate limit switched off, so two tests can run side by side.
+      # Production, nightly and manual runs stay at one worker (the production rate limit is on).
+      E2E_WORKERS: ${{ github.event_name == 'repository_dispatch' && !startsWith(github.event.client_payload.environment, 'Production') && '2' || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the target URL
+        run: |
+          BASE_URL="${BASE_URL%/}"   # a trailing slash would become "//api/..." and make the site redirect
+          if [[ ! "$BASE_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+            echo "::error::BASE_URL must look like https://your-site.vercel.app (got: '$BASE_URL'). Set the repository variable E2E_BASE_URL (Settings > Secrets and variables > Actions > Variables), or pass a URL when running the workflow by hand."
+            exit 1
+          fi
+          echo "BASE_URL=$BASE_URL" >> "$GITHUB_ENV"   # the cleaned address is used by every later step
+          echo "Testing $BASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tell the app commit that tests have started
+        if: github.event_name == 'repository_dispatch' && env.APP_STATUS_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.APP_STATUS_TOKEN }}
+          APP_REPO: ${{ github.event.client_payload.repo }}
+          APP_SHA: ${{ github.event.client_payload.sha }}
+          DEPLOY_ENV: ${{ github.event.client_payload.environment }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          case "$DEPLOY_ENV" in Production*) label=production ;; *) label=preview ;; esac
+          gh api -X POST "repos/$APP_REPO/statuses/$APP_SHA" \
+            -f state=pending -f context="e2e / smoke ($label)" \
+            -f description="Smoke tests are running…" -f target_url="$RUN_URL"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        # `npm ci` installs exactly what package-lock.json says (safest). A brand-new repo has no lock file until you
+        # create one once (see the setup guide), so fall back to a normal install rather than failing.
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+
+      - name: Wait until the site answers
+        run: |
+          args=()
+          [ -n "$VERCEL_BYPASS_SECRET" ] && args=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+          for i in $(seq 1 24); do
+            out=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "${args[@]}" "$BASE_URL/api/auth/diagnostics" || true)
+            code="${out%% *}"
+            where="${out#* }"
+            if [ "$code" = "200" ]; then echo "Site is up (attempt $i)"; exit 0; fi
+            case "$code" in
+              3*)
+                # A redirect will not fix itself by waiting, so explain it right away.
+                echo "::error::$BASE_URL answered HTTP $code and redirects to: ${where:-unknown}. Set the repository variable (E2E_BASE_URL / E2E_PROD_URL) to the address it redirects to, without a trailing slash."
+                exit 1 ;;
+            esac
+            echo "Attempt $i: HTTP $code — waiting 10 s"
+            sleep 10
+          done
+          echo "::error::The site did not become healthy at $BASE_URL (is it deployed? is Vercel protection on? HTTP $code)"
+          exit 1
+
+      - name: Run smoke tests
+        run: npx playwright test --grep @smoke
+
+      - name: Summarise the results
+        id: summary
+        if: always()
+        run: node scripts/summarize.mjs >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-reports
+          retention-days: 14
+          path: |
+            playwright-report
+            test-results
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-smoke
+          retention-days: 14
+          if-no-files-found: ignore
+          path: allure-results
+
+      - name: Report the result on the app commit
+        if: always() && github.event_name == 'repository_dispatch' && env.APP_STATUS_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.APP_STATUS_TOKEN }}
+          APP_REPO: ${{ github.event.client_payload.repo }}
+          APP_SHA: ${{ github.event.client_payload.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          DEPLOY_ENV: ${{ github.event.client_payload.environment }}
+          SUMMARY_LINE: ${{ steps.summary.outputs.line }}
+        run: |
+          case "$DEPLOY_ENV" in Production*) label=production ;; *) label=preview ;; esac
+          case "$JOB_STATUS" in
+            success)   state=success; text="Smoke tests passed" ;;
+            cancelled) state=error;   text="Smoke tests were cancelled" ;;
+            *)         state=failure; text="Smoke tests failed — open the run for the report" ;;
+          esac
+          [ -n "$SUMMARY_LINE" ] && text="$text ($SUMMARY_LINE)"
+          text="${text:0:135}"   # GitHub limits a status description to 140 characters
+          gh api -X POST "repos/$APP_REPO/statuses/$APP_SHA" \
+            -f state="$state" -f context="e2e / smoke ($label)" \
+            -f description="$text" -f target_url="$RUN_URL"
+
+  regression:
+    name: Full regression
+    # Only on the nightly schedule, or when you ask for it by hand. Smoke must pass first.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite != 'smoke')
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_BYPASS_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        # `npm ci` installs exactly what package-lock.json says (safest). A brand-new repo has no lock file until you
+        # create one once (see the setup guide), so fall back to a normal install rather than failing.
+        run: if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run regression tests
+        env:
+          # suite = ratelimit runs only the manual rate-limit check; everything else runs the normal regression set
+          E2E_GREP: ${{ inputs.suite == 'ratelimit' && '@ratelimit' || '@regression' }}
+          EXPECT_RATE_LIMIT: ${{ inputs.expect_rate_limit || 'on' }}
+        run: npx playwright test --project=chromium --grep "$E2E_GREP"
+
+      - name: Summarise the results
+        if: always()
+        run: node scripts/summarize.mjs >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-reports
+          retention-days: 14
+          path: |
+            playwright-report
+            test-results
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-regression
+          retention-days: 14
+          if-no-files-found: ignore
+          path: allure-results
+
+  # Builds one Allure report from every job above and publishes it to GitHub Pages (branch "gh-pages").
+  allure-report:
+    name: Publish Allure report
+    needs: [smoke, regression]
+    # Run even when tests failed (that is when you want the report most), but not for pull requests.
+    # Off by default: set the repository variable ALLURE_PAGES=true when you want the report published (needs GitHub Pages).
+    if: always() && vars.ALLURE_PAGES == 'true' && github.event_name != 'pull_request' && needs.smoke.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # needed to push the gh-pages branch
+    env:
+      RUN_NUMBER: ${{ github.run_number }}
+      PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Download the Allure results of all jobs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: allure-results-*
+          path: allure-results
+          merge-multiple: true
+
+      - name: Does the gh-pages branch exist yet?
+        id: branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the existing report site (for the history)
+        if: steps.branch.outputs.exists == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Generate the report (with history from earlier runs)
+        run: |
+          mkdir -p allure-results/history
+          if [ -d site/history ]; then cp -r site/history/. allure-results/history/; fi
+          cat > allure-results/executor.json <<JSON
+          {"name":"GitHub Actions","type":"github","buildName":"Run #${RUN_NUMBER}","buildOrder":${RUN_NUMBER},"buildUrl":"${RUN_URL}","reportUrl":"${PAGES_URL}/${RUN_NUMBER}/","reportName":"LifeOS E2E"}
+          JSON
+          npx --yes allure-commandline@2 generate allure-results --clean -o allure-report
+
+      - name: Assemble the site (latest + the last 20 runs + history)
+        run: |
+          mkdir -p site
+          rm -rf site/latest "site/${RUN_NUMBER}" site/history
+          cp -r allure-report site/latest
+          cp -r allure-report "site/${RUN_NUMBER}"
+          cp -r allure-report/history site/history
+          # keep only the 20 newest numbered reports
+          ls -d site/[0-9]* 2>/dev/null | sort -t/ -k2 -n | head -n -20 | xargs -r rm -rf
+          touch site/.nojekyll
+          printf '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=latest/"><a href="latest/">Latest LifeOS E2E report</a>\n' > site/index.html
+
+      - name: Publish to GitHub Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd site
+          if [ ! -d .git ]; then
+            git init -b gh-pages
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Allure report for run #${RUN_NUMBER}" || { echo "Nothing to publish"; exit 0; }
+          git push origin HEAD:gh-pages
+          {
+            echo "### Allure report"
+            echo "[Open the report for this run](${PAGES_URL}/${RUN_NUMBER}/) · [latest](${PAGES_URL}/latest/)"
+          } >> "$GITHUB_STEP_SUMMARY"
