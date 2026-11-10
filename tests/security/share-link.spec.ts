@@ -1,5 +1,5 @@
 import { test, expect } from '../../src/fixtures/test';
-import { BAD_SHARE_TOKENS, XSS_NAME } from '../../src/data/security-cases';
+import { BAD_SHARE_TOKENS, LEAK_PATTERNS, XSS_NAME } from '../../src/data/security-cases';
 import { WEEKDAY, lastWeekday } from '../../src/helpers/dates';
 import { newGuestContext } from '../../src/helpers/guest';
 import { SharePage } from '../../src/pages/share.page';
@@ -79,9 +79,16 @@ test.describe('Share link security', () => {
 
   for (const { title, token } of BAD_SHARE_TOKENS) {
     test(`${title} shows the "not available" page`, { tag: TAGS }, async ({ page }) => {
-      const share = new SharePage(page);
-      await share.open(`/share/${encodeURIComponent(token)}`);
-      await expect(share.missing).toBeVisible();
+      const response = await page.goto(`/share/${encodeURIComponent(token)}`);
+      const status = response?.status() ?? 0;
+      expect(status, 'the server must not crash on this address').toBeLessThan(500);
+      if (status >= 400) {
+        // The web server itself refused the address (for example a 404 for an encoded "../"): a clean answer.
+        expect(await page.content()).not.toMatch(LEAK_PATTERNS);
+        return;
+      }
+      // Otherwise the app must say plainly that the link is not available — not hang and not show an error page.
+      await expect(page.getByTestId('share-missing'), `the page said: ${(await page.locator('body').innerText()).slice(0, 150)}`).toBeVisible({ timeout: 30_000 });
     });
   }
 });

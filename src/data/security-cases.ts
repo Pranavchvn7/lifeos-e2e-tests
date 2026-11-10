@@ -51,4 +51,6 @@ export const REQUIRED_HEADERS: Record<string, string | RegExp> = {
 
 /** Text that would prove server-only code or a secret was bundled into the JavaScript sent to every visitor. */
 export const BUNDLE_SECRET_PATTERNS =
-  /postgres(ql)?:\/\/|BETTER_AUTH_SECRET|neon\.tech|-----BEGIN [A-Z ]*PRIVATE KEY|github_pat_|ghp_/;
+  /postgres(ql)?:\/\/|neon\.tech|-----BEGIN [A-Z ]*PRIVATE KEY|github_pat_|ghp_|BETTER_AUTH_SECRET\s*[:=]\s*["'`][A-Za-z0-9+\/=_-]{16,}/;
+// The bare word BETTER_AUTH_SECRET is deliberately NOT matched: the sign-in library's own browser code lists the NAMES of
+// environment variables it may read (and reads none of them in a browser). Only an assigned secret VALUE is a finding.

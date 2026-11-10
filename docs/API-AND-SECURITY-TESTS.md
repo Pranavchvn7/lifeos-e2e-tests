@@ -42,6 +42,7 @@ Two new groups of tests, both tagged `@regression` so the nightly and manual run
 18. **Two accounts never see each other's data** — two browsers, two accounts, a unique text in each; neither text appears on the other's screen or in any server response.
 19. **The browser code contains no secrets and no source maps** — every JavaScript file the site sends is scanned for connection strings and secret names, and each `.js.map` address must not serve a source map.
 20. **The login page loads no scripts from other websites** — reads the served HTML and lists every `<script src>` that points elsewhere; only Vercel's preview toolbar is allowed. (Fails until the grok.com script fix is deployed.)
+*Revised after the first full run:* #17 now forges the save with different text and checks that the owner's saved text is unchanged after a reload (the property that matters), instead of insisting on a particular HTTP status; the data-read and data-write tests wait for the save that actually contains their text; #19 no longer flags the library's list of environment-variable *names* (only assigned secret values, connection strings and keys); the malformed-share-link tests accept a clean 4xx from the web server as well as the app's "not available" page.
 Likeliest first-run surprises: #17 finds no POST (the save request is named differently — check the Network tab), #19 flags a harmless string (look at the file named in the message).
 
 ## If one fails on its first run — read this first

@@ -3,6 +3,7 @@ import { cleanup } from '../../src/fixtures/test';
 import { BUNDLE_SECRET_PATTERNS } from '../../src/data/security-cases';
 import { apiHeaders, siteUrl } from '../../src/helpers/api';
 import { newGuestContext } from '../../src/helpers/guest';
+import { persistText } from '../../src/helpers/persist';
 import { newUser } from '../../src/helpers/user-factory';
 import { AppShell } from '../../src/pages/app-shell.page';
 import { LoginPage } from '../../src/pages/login.page';
@@ -11,7 +12,7 @@ import { TodayPage } from '../../src/pages/today.page';
 const TAGS = ['@regression', '@security'];
 
 test.describe('Writes and tenant isolation', () => {
-  test('saving data is refused without a session and from another website', { tag: TAGS }, async ({ signedIn, today, page, playwright }) => {
+  test('saving data without a session, or from another website, changes nothing', { tag: TAGS }, async ({ signedIn, today, page, playwright }) => {
     await today.loadExample();
 
     // Record the app's own "save" requests (POST calls to this site, other than the sign-in service).
@@ -23,28 +24,36 @@ test.describe('Writes and tenant isolation', () => {
         writes.push({ url: request.url(), body: request.postData() ?? '', type: request.headers()['content-type'] ?? 'application/json' });
       }
     });
-    await today.setOneLine(`WRITE-${Date.now()}`);
-    await expect.poll(() => writes.length, { message: 'the app should save with a POST request', timeout: 20_000 }).toBeGreaterThan(0);
+    const marker = `WRITE-${Date.now()}`;
+    await persistText(page, marker, () => page.getByTestId('one-line-input').fill(marker));
+    const saves = writes.filter((write) => write.body.includes(marker));
+    expect(saves.length, 'the save request that contains the typed text was not recorded').toBeGreaterThan(0);
 
-    // 1. Replay each save with no session cookie at all.
+    // Forge the same request with DIFFERENT text, so any effect on the owner's data is unmistakable.
+    const attacker = `ATTACK-${Date.now()}`;
+    const report: string[] = [];
     const stranger = await playwright.request.newContext({ extraHTTPHeaders: apiHeaders() });
     try {
-      for (const write of writes) {
-        const response = await stranger.post(write.url, { data: write.body, headers: { 'content-type': write.type } });
-        expect(response.ok(), `${new URL(write.url).pathname} must refuse a signed-out caller`).toBe(false);
+      for (const save of saves) {
+        const body = save.body.split(marker).join(attacker);
+        const noSession = await stranger.post(save.url, { data: body, headers: { 'content-type': save.type } });
+        report.push(`signed-out: HTTP ${noSession.status()} ${(await noSession.text()).slice(0, 100).replace(/\s+/g, ' ')}`);
+        // With the owner's cookie, but claiming to come from another website (what a malicious page would send).
+        const crossSite = await page.request.post(save.url, {
+          data: body,
+          headers: { 'content-type': save.type, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' },
+        });
+        report.push(`cross-site: HTTP ${crossSite.status()} ${(await crossSite.text()).slice(0, 100).replace(/\s+/g, ' ')}`);
       }
     } finally {
       await stranger.dispose();
     }
+    test.info().annotations.push({ type: 'forged saves', description: report.join(' | ') });
 
-    // 2. Replay with the owner's cookie, but claiming to come from another website (what a malicious page would send).
-    for (const write of writes) {
-      const response = await page.request.post(write.url, {
-        data: write.body,
-        headers: { 'content-type': write.type, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' },
-      });
-      expect(response.ok(), `${new URL(write.url).pathname} must refuse requests from other sites`).toBe(false);
-    }
+    // What matters is that nothing was written: the owner's saved text is still their own after a reload.
+    await page.reload();
+    await new AppShell(page).expectReady();
+    await expect(page.getByTestId('one-line-input'), `a forged save changed the owner's data. Replies: ${report.join(' | ')}`).toHaveValue(marker);
   });
 
   test('two accounts never see each other\'s data', { tag: TAGS }, async ({ signedIn, today, page, browser, baseURL }) => {
