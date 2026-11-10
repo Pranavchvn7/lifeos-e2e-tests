@@ -17,7 +17,15 @@ export class LoginPage extends BasePage {
 
   async goto(): Promise<void> {
     await this.page.goto('/login');
-    await expect(this.submit).toBeVisible();
+    try {
+      await expect(this.submit).toBeVisible();
+    } catch {
+      // Say what the browser actually saw, so the cause is obvious from the log alone (for example the Vercel login
+      // page when the protection bypass secret is wrong, an error page, or a blank page).
+      const title = await this.page.title().catch(() => '?');
+      const text = (await this.page.locator('body').innerText({ timeout: 2_000 }).catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+      throw new Error(`The sign-in form did not appear. URL: ${this.page.url()} | page title: "${title}" | page text: "${text}"`);
+    }
   }
 
   async signUp(user: TestUser): Promise<void> {
