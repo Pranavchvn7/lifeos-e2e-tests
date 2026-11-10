@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { ERROR_PROBES, LEAK_PATTERNS, REQUIRED_HEADERS, SENSITIVE_PATHS } from '../../src/data/security-cases';
-import { apiHeaders } from '../../src/helpers/api';
+import { apiHeaders, siteUrl } from '../../src/helpers/api';
 
 const TAGS = ['@regression', '@security'];
 
@@ -27,6 +27,19 @@ test.describe('Nothing sensitive is exposed', () => {
       expect(await response.text()).not.toMatch(LEAK_PATTERNS);
     });
   }
+
+  test('the login page loads no scripts from other websites', { tag: TAGS }, async ({ request }) => {
+    // A script from another website runs with full access to the page, so every script must come from this site
+    // (the only exception is Vercel's own preview toolbar, which exists on preview deployments only).
+    const html = await (await request.get('/login', { headers: apiHeaders() })).text();
+    const own = new URL(siteUrl()).host;
+    const foreign = [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)]
+      .map((match) => match[1])
+      .filter((src) => /^(https?:)?\/\//i.test(src))
+      .map((src) => new URL(src.startsWith('//') ? `https:${src}` : src).host)
+      .filter((host) => host !== own && host !== 'vercel.live');
+    expect(foreign, `scripts loaded from other websites: ${foreign.join(', ')}`).toEqual([]);
+  });
 
   test('pages and API answers carry the basic security headers', { tag: TAGS }, async ({ request }) => {
     for (const path of ['/', '/api/auth/get-session']) {

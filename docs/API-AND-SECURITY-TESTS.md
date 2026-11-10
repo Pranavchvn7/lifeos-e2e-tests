@@ -41,6 +41,7 @@ Two new groups of tests, both tagged `@regression` so the nightly and manual run
 17. **Saving is refused without a session and from another website** — the app's own save request is replayed with no cookie, and with the owner's cookie claiming to come from another site; both must fail.
 18. **Two accounts never see each other's data** — two browsers, two accounts, a unique text in each; neither text appears on the other's screen or in any server response.
 19. **The browser code contains no secrets and no source maps** — every JavaScript file the site sends is scanned for connection strings and secret names, and each `.js.map` address must not serve a source map.
+20. **The login page loads no scripts from other websites** — reads the served HTML and lists every `<script src>` that points elsewhere; only Vercel's preview toolbar is allowed. (Fails until the grok.com script fix is deployed.)
 Likeliest first-run surprises: #17 finds no POST (the save request is named differently — check the Network tab), #19 flags a harmless string (look at the file named in the message).
 
 ## If one fails on its first run — read this first
