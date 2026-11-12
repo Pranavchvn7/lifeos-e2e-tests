@@ -1,7 +1,7 @@
 import { test, expect } from '../../src/fixtures/test';
 import { cleanup } from '../../src/fixtures/test';
 import { BUNDLE_SECRET_PATTERNS } from '../../src/data/security-cases';
-import { apiHeaders, siteUrl } from '../../src/helpers/api';
+import { apiHeaders, replayHeaders, siteUrl } from '../../src/helpers/api';
 import { newGuestContext } from '../../src/helpers/guest';
 import { persistText } from '../../src/helpers/persist';
 import { newUser } from '../../src/helpers/user-factory';
@@ -17,11 +17,11 @@ test.describe('Writes and tenant isolation', () => {
 
     // Record the app's own "save" requests (POST calls to this site, other than the sign-in service).
     const origin = new URL(siteUrl()).origin;
-    const writes: { url: string; body: string; type: string }[] = [];
+    const writes: { url: string; body: string; headers: Record<string, string> }[] = [];
     page.on('request', (request) => {
       const url = new URL(request.url());
       if (url.origin === origin && request.method() === 'POST' && ['fetch', 'xhr'].includes(request.resourceType()) && !url.pathname.startsWith('/api/auth/')) {
-        writes.push({ url: request.url(), body: request.postData() ?? '', type: request.headers()['content-type'] ?? 'application/json' });
+        writes.push({ url: request.url(), body: request.postData() ?? '', headers: request.headers() });
       }
     });
     const marker = `WRITE-${Date.now()}`;
@@ -36,12 +36,12 @@ test.describe('Writes and tenant isolation', () => {
     try {
       for (const save of saves) {
         const body = save.body.split(marker).join(attacker);
-        const noSession = await stranger.post(save.url, { data: body, headers: { 'content-type': save.type } });
+        const noSession = await stranger.post(save.url, { data: body, headers: replayHeaders(save.headers) });
         report.push(`signed-out: HTTP ${noSession.status()} ${(await noSession.text()).slice(0, 100).replace(/\s+/g, ' ')}`);
         // With the owner's cookie, but claiming to come from another website (what a malicious page would send).
         const crossSite = await page.request.post(save.url, {
           data: body,
-          headers: { 'content-type': save.type, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' },
+          headers: { ...replayHeaders(save.headers), 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' },
         });
         report.push(`cross-site: HTTP ${crossSite.status()} ${(await crossSite.text()).slice(0, 100).replace(/\s+/g, ' ')}`);
       }

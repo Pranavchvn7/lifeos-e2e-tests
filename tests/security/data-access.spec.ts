@@ -1,5 +1,5 @@
 import { test, expect } from '../../src/fixtures/test';
-import { apiHeaders, siteUrl } from '../../src/helpers/api';
+import { apiHeaders, isRefused, replayHeaders, siteUrl } from '../../src/helpers/api';
 import { persistText } from '../../src/helpers/persist';
 
 test.describe('Who can read the saved data', () => {
@@ -10,11 +10,11 @@ test.describe('Who can read the saved data', () => {
 
     // Record the app's own data requests while it reloads (GET requests to this site, other than the sign-in service).
     const origin = new URL(siteUrl()).origin;
-    const dataRequests = new Set<string>();
+    const dataRequests = new Map<string, Record<string, string>>(); // address -> the headers the browser sent
     page.on('request', (request) => {
       const url = new URL(request.url());
       if (url.origin === origin && request.method() === 'GET' && ['fetch', 'xhr'].includes(request.resourceType()) && !url.pathname.startsWith('/api/auth/')) {
-        dataRequests.add(request.url());
+        dataRequests.set(request.url(), request.headers());
       }
     });
     await page.reload();
@@ -24,8 +24,8 @@ test.describe('Who can read the saved data', () => {
     // 1. Sanity check — with the owner's cookie the same request does return the private text,
     //    otherwise the two checks below would pass for the wrong reason.
     const owner = await Promise.all(
-      [...dataRequests].map(async (url) => {
-        const response = await page.request.get(url);
+      [...dataRequests].map(async ([url, headers]) => {
+        const response = await page.request.get(url, { headers: replayHeaders(headers) });
         return { path: new URL(url).pathname.slice(0, 40), status: response.status(), body: await response.text() };
       }),
     );
@@ -35,20 +35,22 @@ test.describe('Who can read the saved data', () => {
     // 2. No session cookie: the server must refuse and must not include the text.
     const stranger = await playwright.request.newContext({ extraHTTPHeaders: apiHeaders() });
     try {
-      for (const url of dataRequests) {
-        const response = await stranger.get(url);
-        expect(response.ok(), `${new URL(url).pathname} must not answer a signed-out caller`).toBe(false);
-        expect(await response.text()).not.toContain(marker);
+      for (const [url, headers] of dataRequests) {
+        const response = await stranger.get(url, { headers: replayHeaders(headers) });
+        const body = await response.text();
+        expect(isRefused(response.status(), body), `${new URL(url).pathname} must refuse a signed-out caller. Got HTTP ${response.status()}: ${body.slice(0, 120)}`).toBe(true);
+        expect(body).not.toContain(marker);
       }
     } finally {
       await stranger.dispose();
     }
 
     // 3. Owner's cookie, but the request claims to come from another website (what a malicious page would send).
-    for (const url of dataRequests) {
-      const response = await page.request.get(url, { headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' } });
-      expect(response.ok(), `${new URL(url).pathname} must refuse requests from other sites`).toBe(false);
-      expect(await response.text()).not.toContain(marker);
+    for (const [url, headers] of dataRequests) {
+      const response = await page.request.get(url, { headers: { ...replayHeaders(headers), 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors' } });
+      const body = await response.text();
+      expect(isRefused(response.status(), body), `${new URL(url).pathname} must refuse requests from other sites. Got HTTP ${response.status()}: ${body.slice(0, 120)}`).toBe(true);
+      expect(body).not.toContain(marker);
     }
   });
 });

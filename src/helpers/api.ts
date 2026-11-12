@@ -40,3 +40,21 @@ export async function authPost(
     await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_PAUSE_MS));
   }
 }
+
+/**
+ * Headers of a request the browser really sent, ready to be replayed by a script. TanStack Start answers a bare request
+ * (one without its `x-tsr-serverfn` header) with "403 Forbidden" — a built-in protection — so a faithful replay must carry
+ * the same headers. The cookie, length and connection headers are left out: the HTTP client adds the ones it needs.
+ */
+export function replayHeaders(recorded: Record<string, string>): Record<string, string> {
+  const skip = new Set(['host', 'cookie', 'content-length', 'connection', 'accept-encoding']);
+  return Object.fromEntries(Object.entries(recorded).filter(([name]) => !skip.has(name.toLowerCase())));
+}
+
+/**
+ * Did the server refuse? TanStack Start reports a refused server-function call as HTTP 200 with an error object inside
+ * the body (marked `$TSR/Error`), not as an HTTP error status — so both forms count as a refusal.
+ */
+export function isRefused(status: number, body: string): boolean {
+  return status >= 400 || body.includes('$TSR/Error');
+}
