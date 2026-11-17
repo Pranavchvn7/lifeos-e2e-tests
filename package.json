@@ -19,7 +19,7 @@
     "test:security": "playwright test --project=chromium --grep @security"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
+    "@playwright/test": "^1.65.1",
     "@types/node": "^22.0.0",
     "allure-playwright": "^3.0.0",
     "exceljs": "^4.4.0",
